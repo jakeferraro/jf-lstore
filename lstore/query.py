@@ -43,7 +43,26 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select(self, search_key, search_key_index, projected_columns_index):
-        pass
+        records = []
+        for rid in self.table.page_directory:
+            # Read search column
+            page_index, slot = self.table.page_directory[rid]
+            col_index = 4 + search_key_index
+            value = self.table.base_pages[col_index][page_index].read(slot)
+
+            if value == search_key:
+                col_vals = []
+                for index, col in enumerate(projected_columns_index):   # to use index
+                    if col == 1:
+                        val = self.table.base_pages[index+4][page_index].read(slot)
+                        col_vals.append(val)
+
+                key_col_index = 4 + self.table.key
+                key = self.table.base_pages[key_col_index][page_index]
+                
+                records.append(Record(rid, key, col_vals))
+                        
+        return records
 
     
     """
