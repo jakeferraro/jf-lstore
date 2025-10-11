@@ -44,10 +44,10 @@ class Query:
     """
     def select(self, search_key, search_key_index, projected_columns_index):
         records = []
+        col_index = 4 + search_key_index
         for rid in self.table.page_directory:
             # Read search column
             page_index, slot = self.table.page_directory[rid]
-            col_index = 4 + search_key_index
             value = self.table.base_pages[col_index][page_index].read(slot)
 
             if value == search_key:
@@ -58,8 +58,8 @@ class Query:
                         col_vals.append(val)
 
                 key_col_index = 4 + self.table.key
-                key = self.table.base_pages[key_col_index][page_index]
-                
+                key = self.table.base_pages[key_col_index][page_index].read(slot)
+
                 records.append(Record(rid, key, col_vals))
                         
         return records
@@ -85,7 +85,16 @@ class Query:
     # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
     """
     def update(self, primary_key, *columns):
-        pass
+        key_col_index = 4 + self.table.key      # Metadata offset
+        for rid in self.table.base_rids:
+            page_index, slot = self.table.page_directory[rid]
+            value = self.table.base_pages[key_col_index][page_index].read(slot)
+
+            if value == primary_key:
+                self.table.create_tail_record(rid, columns)
+                return True
+            
+        return False
 
     
     """
@@ -114,7 +123,7 @@ class Query:
 
     
     """
-    incremenets one column of the record
+    increments one column of the record
     this implementation should work if your select and update queries already work
     :param key: the primary of key of the record to increment
     :param column: the column to increment

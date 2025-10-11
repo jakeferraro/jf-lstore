@@ -17,4 +17,8 @@ class Page:
     def read(self, index):
         position = index * 8
         data_bytes = self.data[position:position+8]
-        return int.from_bytes(data_bytes, byteorder='big') 
+        return int.from_bytes(data_bytes, byteorder='big')
+    
+    def update(self, index, value):
+        byte_val = value.to_bytes(8, byteorder='big')
+        self.data[index:index+8] = byte_val

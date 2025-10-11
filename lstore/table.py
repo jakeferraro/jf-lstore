@@ -29,6 +29,9 @@ class Table:
         self.page_directory = {}
         self.index = Index(self)
         self.next_rid = 0
+        self.base_rids = set()
+        self.next_base_position = 0
+        self.next_tail_position = 0
         self.base_pages = [[Page()] for _ in range(4 + self.num_columns)]   # 4 metadata cols, num_columns user cols
         self.tail_pages = [[Page()] for _ in range(4 + self.num_columns)]
 
@@ -38,12 +41,15 @@ class Table:
     
     def insert_record(self, columns):
         rid = self.next_rid
+        self.base_rids.add(rid)
         self.next_rid += 1
         indirection = 0
         schema_encoding = 0     # Schema encoding on write will always be 0
         timestamp = int(time())
-        page_index = rid // 512     
-        slot = rid % 512
+        position = self.next_base_position
+        page_index = position // 512     
+        slot = position % 512
+        self.next_base_position += 1
 
         if page_index >= len(self.base_pages[0]):       # Create new page if needed
             for col in range(4 + self.num_columns):
@@ -61,3 +67,53 @@ class Table:
             self.base_pages[col_index][page_index].write(value)
         
         self.page_directory[rid] = (page_index, slot)
+
+    def _update_base_indirection(self, rid, new_indirection_val):
+        page_index, slot = self.page_directory[rid]
+        self.base_pages[0][page_index].update(slot, new_indirection_val)
+
+    def _update_base_schema(self, rid, new_schema_val):
+        page_index, slot = self.page_directory[rid]
+        current_schema = self.base_pages[3][page_index].read(slot)
+        # OR with new schema to accumulate which columns have been updated
+        updated_schema = current_schema | new_schema_val
+        self.base_pages[3][page_index].update(slot, updated_schema)
+
+    def create_tail_record(self, base_rid, columns):
+        # First, generate metadata vals
+        rid = self.next_rid
+        self.next_rid += 1
+        # Use base page's current indirection val as new tail record indirection val
+        base_page_index, base_slot = self.page_directory[base_rid]
+        indirection = self.base_pages[0][base_page_index].read(base_slot)
+        # Use bit shifting to generate schema encoding integer from columns tuple
+        schema_encoding = 0
+        for i, col_value in enumerate(columns):
+            if col_value is not None:
+                schema_encoding |= (1 << i)     # Set the i-th bit
+        timestamp = int(time())
+        # Second, generate page_index and slot
+        position = self.next_tail_position
+        page_index = position // 512
+        slot = position % 512
+        self.next_tail_position += 1
+        # Third, check if page exists and allocate if not
+        if page_index >= len(self.tail_pages[0]):
+            for col in range(4 + self.num_columns):
+                self.tail_pages[col].append(Page())
+        # Fourth, update base page indirection and schema
+        self._update_base_indirection(base_rid, rid)
+        self._update_base_schema(base_rid, schema_encoding)
+        # Fifth, write metadata columns
+        self.tail_pages[0][page_index].write(indirection)
+        self.tail_pages[1][page_index].write(rid)
+        self.tail_pages[2][page_index].write(timestamp)
+        self.tail_pages[3][page_index].write(schema_encoding)
+        # Sixth, write user data for columns that are not None
+        for i, value in enumerate(columns):
+            col_index = 4 + i
+            if value is not None:
+                self.tail_pages[col_index][page_index].write(value)
+        
+        self.page_directory[rid] = (page_index, slot)
+        
