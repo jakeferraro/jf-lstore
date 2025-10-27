@@ -21,7 +21,22 @@ class Query:
     # Return False if record doesn't exist or is locked due to 2PL
     """
     def delete(self, primary_key):
-        pass
+        key_col_index = 4 + self.table.key
+
+        # Find record with primary key
+        for rid in list(self.table.base_rids):
+            page_index, slot = self.table.page_directory[rid]
+            value = self.table.base_pages[key_col_index][page_index].read(slot)
+            
+            if value == primary_key:
+                # Mark base record as deleted by setting RID to max val
+                self.table.base_pages[1][page_index].update(slot, 0xFFFFFFFFFFFFFFFF)
+                # Remove from base_rids set
+                self.table.base_rids.discard(rid)
+
+                return True
+            
+        return False
     
     
     """
@@ -46,7 +61,7 @@ class Query:
         records = []
         col_index = 4 + search_key_index
 
-        for rid in self.table.page_directory:
+        for rid in self.table.base_rids:
             # Read search column
             page_index, slot = self.table.page_directory[rid]
             value = self.table.base_pages[col_index][page_index].read(slot)
@@ -73,7 +88,7 @@ class Query:
                         if schema_encoding & (1 << col_num):
                             # Read value from tail
                             tail_col_index = 4 + col_num
-                            result_columns[col_num] = self.table.tail_pages[tail_col_index]
+                            result_columns[col_num] = self.table.tail_pages[tail_col_index][tail_page_index].read(tail_slot)
                             columns_needed.remove(col_num)
                     current_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
                 # Fill in remaining columns from base record
@@ -83,7 +98,7 @@ class Query:
 
                 key_val = result_columns[self.table.key]
                 record = Record(rid, key_val, result_columns)
-                records.append(Record)
+                records.append(record)
 
         return records
                 
@@ -131,7 +146,44 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        pass
+        total = 0
+        key_col_index = 4 + self.table.key
+        agg_col_index = 4 + aggregate_column_index
+        found_any = False
+
+        # Iterate through base records
+        for rid in self.table.base_rids:
+            page_index, slot = self.table.page_directory[rid]
+            key_val = self.table.base_pages[key_col_index][page_index].read(slot)
+
+            if start_range <= key_val <= end_range:
+                found_any = True
+                # Get latest val for agg column
+                base_page_index, base_slot = self.table.page_directory[rid]
+                current_tail_rid = self.table.base_pages[0][base_page_index].read(base_slot)
+
+                value_found = False
+                # Traverse tail records to find latest val for this col
+                while current_tail_rid != 0 and not value_found:
+                    tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
+                    schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
+                    # Check if this col was updated in this tail record
+                    if schema_encoding & (1 << aggregate_column_index):
+                        value = self.table.tail_pages[agg_col_index][tail_page_index].read(tail_slot)
+                        total += value
+                        value_found = True
+                    # Move to previous tail record
+                    current_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
+                # If not found in tail records, get from base
+                if not value_found:
+                    value = self.table.base_pages[agg_col_index][page_index].read(slot)
+                    total += value
+
+        if not found_any:
+            return False
+        
+        return total
+
 
     
     """
