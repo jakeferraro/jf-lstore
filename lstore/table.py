@@ -68,6 +68,11 @@ class Table:
         
         self.page_directory[rid] = (page_index, slot)
 
+        # Update indexes for all indexed cols
+        for col_num in range(self.num_columns):
+            if self.index.indices[col_num] is not None:
+                self.index._insert_entry(col_num, columns[col_num], rid)
+
     def _update_base_indirection(self, rid, new_indirection_val):
         page_index, slot = self.page_directory[rid]
         self.base_pages[0][page_index].update(slot, new_indirection_val)
