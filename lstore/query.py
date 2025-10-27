@@ -45,24 +45,49 @@ class Query:
     def select(self, search_key, search_key_index, projected_columns_index):
         records = []
         col_index = 4 + search_key_index
+
         for rid in self.table.page_directory:
             # Read search column
             page_index, slot = self.table.page_directory[rid]
             value = self.table.base_pages[col_index][page_index].read(slot)
 
-            if value == search_key:
-                col_vals = []
-                for index, col in enumerate(projected_columns_index):   # to use index
-                    if col == 1:
-                        val = self.table.base_pages[index+4][page_index].read(slot)
-                        col_vals.append(val)
+            if value == search_key:     # Matching base record found
+                # Initalize result columns
+                result_columns = [None] * self.table.num_columns
+                # Track which columns are needed
+                columns_needed = set()
+                for i, is_projected in enumerate(projected_columns_index):
+                    if is_projected == 1:
+                        columns_needed.add(i)
+                # Start with base record's indirection
+                base_page_index, base_slot = self.table.page_directory[rid]
+                current_tail_rid = self.table.base_pages[0][base_page_index].read(base_slot)
+                # Traverse tail records
+                while current_tail_rid != 0 and len(columns_needed) > 0:
+                    tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
+                    # Read schema encoding to see which columns are in this tail record
+                    schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
+                    # Check each column we still need
+                    for col_num in list(columns_needed):
+                        # Check if this col was updated in this tail record
+                        if schema_encoding & (1 << col_num):
+                            # Read value from tail
+                            tail_col_index = 4 + col_num
+                            result_columns[col_num] = self.table.tail_pages[tail_col_index]
+                            columns_needed.remove(col_num)
+                    current_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
+                # Fill in remaining columns from base record
+                for col_num in columns_needed:
+                    base_col_index = 4 + col_num
+                    result_columns[col_num] = self.table.base_pages[base_col_index][base_page_index].read(base_slot)
 
-                key_col_index = 4 + self.table.key
-                key = self.table.base_pages[key_col_index][page_index].read(slot)
+                key_val = result_columns[self.table.key]
+                record = Record(rid, key_val, result_columns)
+                records.append(Record)
 
-                records.append(Record(rid, key, col_vals))
-                        
         return records
+                
+                
 
     
     """
