@@ -114,6 +114,8 @@ class Table:
             col_index = 4 + i
             if value is not None:
                 self.tail_pages[col_index][page_index].write(value)
-        
+            else:
+                self.tail_pages[col_index][page_index].write(0)
+
         self.page_directory[rid] = (page_index, slot)
         

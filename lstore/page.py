@@ -20,5 +20,6 @@ class Page:
         return int.from_bytes(data_bytes, byteorder='big')
     
     def update(self, index, value):
+        position = index * 8
         byte_val = value.to_bytes(8, byteorder='big')
-        self.data[index:index+8] = byte_val
+        self.data[position:position+8] = byte_val
