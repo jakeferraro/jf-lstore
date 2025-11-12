@@ -6,6 +6,7 @@ INDIRECTION_COLUMN = 0
 RID_COLUMN = 1
 TIMESTAMP_COLUMN = 2
 SCHEMA_ENCODING_COLUMN = 3
+BASE_RID_COLUMN = 4  # Only used in tail records
 
 
 class Record:
@@ -33,7 +34,7 @@ class Table:
         self.next_base_position = 0
         self.next_tail_position = 0
         self.base_pages = [[Page()] for _ in range(4 + self.num_columns)]   # 4 metadata cols, num_columns user cols
-        self.tail_pages = [[Page()] for _ in range(4 + self.num_columns)]
+        self.tail_pages = [[Page()] for _ in range(5 + self.num_columns)]   # 5 metadata cols (includes BaseRID), num_columns user cols
 
     def __merge(self):
         print("merge is happening")
@@ -104,23 +105,23 @@ class Table:
         self.next_tail_position += 1
         # Third, check if page exists and allocate if not
         if page_index >= len(self.tail_pages[0]):
-            for col in range(4 + self.num_columns):
+            for col in range(5 + self.num_columns):  # 5 metadata cols for tail records
                 self.tail_pages[col].append(Page())
         # Fourth, update base page indirection and schema
         self._update_base_indirection(base_rid, rid)
         self._update_base_schema(base_rid, schema_encoding)
-        # Fifth, write metadata columns
+        # Fifth, write metadata columns (including BaseRID)
         self.tail_pages[0][page_index].write(indirection)
         self.tail_pages[1][page_index].write(rid)
         self.tail_pages[2][page_index].write(timestamp)
         self.tail_pages[3][page_index].write(schema_encoding)
+        self.tail_pages[4][page_index].write(base_rid)  # Store BaseRID
         # Sixth, write user data for columns that are not None
         for i, value in enumerate(columns):
-            col_index = 4 + i
+            col_index = 5 + i  # User columns start at index 5 now
             if value is not None:
                 self.tail_pages[col_index][page_index].write(value)
             else:
                 self.tail_pages[col_index][page_index].write(0)
 
         self.page_directory[rid] = (page_index, slot)
-        

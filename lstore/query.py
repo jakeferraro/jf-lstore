@@ -133,8 +133,8 @@ class Query:
                 for col_num in list(columns_needed):
                     # Check if this col was updated in this tail record
                     if schema_encoding & (1 << col_num):
-                        # Read value from tail
-                        tail_col_index = 4 + col_num
+                        # Read value from tail (user columns start at index 5 in tail records)
+                        tail_col_index = 5 + col_num
                         result_columns[col_num] = self.table.tail_pages[tail_col_index][tail_page_index].read(tail_slot)
                         columns_needed.remove(col_num)
                 current_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
@@ -218,7 +218,7 @@ class Query:
                     
                     for col_num in list(columns_needed_copy):
                         if schema_encoding & (1 << col_num):
-                            tail_col_index = 4 + col_num
+                            tail_col_index = 5 + col_num  # User columns at index 5 in tail
                             result_columns[col_num] = self.table.tail_pages[tail_col_index][tail_page_index].read(tail_slot)
                             columns_needed_copy.remove(col_num)
                 
@@ -244,7 +244,7 @@ class Query:
                     
                     for col_num in list(columns_needed_copy):
                         if schema_encoding & (1 << col_num):
-                            tail_col_index = 4 + col_num
+                            tail_col_index = 5 + col_num  # User columns at index 5 in tail
                             result_columns[col_num] = self.table.tail_pages[tail_col_index][tail_page_index].read(tail_slot)
                             columns_needed_copy.remove(col_num)
                 
@@ -292,7 +292,8 @@ class Query:
     """
     def sum(self, start_range, end_range, aggregate_column_index):
         total = 0
-        agg_col_index = 4 + aggregate_column_index
+        agg_col_index_base = 4 + aggregate_column_index  # Base pages
+        agg_col_index_tail = 5 + aggregate_column_index  # Tail pages (includes BaseRID)
         found_any = False
 
         # Use index range query if primary key is indexed (which it should be)
@@ -327,14 +328,14 @@ class Query:
                 schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
                 # Check if this col was updated in this tail record
                 if schema_encoding & (1 << aggregate_column_index):
-                    value = self.table.tail_pages[agg_col_index][tail_page_index].read(tail_slot)
+                    value = self.table.tail_pages[agg_col_index_tail][tail_page_index].read(tail_slot)
                     total += value
                     value_found = True
                 # Move to previous tail record
                 current_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
             # If not found in tail records, get from base
             if not value_found:
-                value = self.table.base_pages[agg_col_index][base_page_index].read(base_slot)
+                value = self.table.base_pages[agg_col_index_base][base_page_index].read(base_slot)
                 total += value
 
         if not found_any:
@@ -355,7 +356,8 @@ class Query:
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         total = 0
-        agg_col_index = 4 + aggregate_column_index
+        agg_col_index_base = 4 + aggregate_column_index  # Base pages
+        agg_col_index_tail = 5 + aggregate_column_index  # Tail pages (includes BaseRID)
         found_any = False
 
         # Use index range query if primary key is indexed
@@ -402,13 +404,13 @@ class Query:
                     schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
                     
                     if schema_encoding & (1 << aggregate_column_index):
-                        value = self.table.tail_pages[agg_col_index][tail_page_index].read(tail_slot)
+                        value = self.table.tail_pages[agg_col_index_tail][tail_page_index].read(tail_slot)
                         total += value
                         value_found = True
                 
                 # If not found in tail records, get from base
                 if not value_found:
-                    value = self.table.base_pages[agg_col_index][base_page_index].read(base_slot)
+                    value = self.table.base_pages[agg_col_index_base][base_page_index].read(base_slot)
                     total += value
             
             else:
@@ -426,13 +428,13 @@ class Query:
                     schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
                     
                     if schema_encoding & (1 << aggregate_column_index):
-                        value = self.table.tail_pages[agg_col_index][tail_page_index].read(tail_slot)
+                        value = self.table.tail_pages[agg_col_index_tail][tail_page_index].read(tail_slot)
                         total += value
                         value_found = True
                 
                 # If not found in tail records, get from base
                 if not value_found:
-                    value = self.table.base_pages[agg_col_index][base_page_index].read(base_slot)
+                    value = self.table.base_pages[agg_col_index_base][base_page_index].read(base_slot)
                     total += value
 
         if not found_any:
