@@ -164,7 +164,100 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        pass
+        records = []
+
+        # Try to use index if available for this column
+        if self.table.index.indices[search_key_index] is not None:
+            rids = self.table.index.locate(search_key_index, search_key)
+        else:
+            # Fall back to linear scan if column is not indexed
+            rids = []
+            col_index = 4 + search_key_index
+            for rid in self.table.base_rids:
+                page_index, slot = self.table.page_directory[rid]
+                value = self.table.base_pages[col_index][page_index].read(slot)
+                if value == search_key:
+                    rids.append(rid)
+        
+        # Process each matching RID
+        for rid in rids:
+            if rid not in self.table.base_rids:
+                continue
+                
+            # Initialize result columns
+            result_columns = [None] * self.table.num_columns
+            # Track which columns are needed
+            columns_needed = set()
+            for i, is_projected in enumerate(projected_columns_index):
+                if is_projected == 1:
+                    columns_needed.add(i)
+            
+            # Start with base record's indirection
+            base_page_index, base_slot = self.table.page_directory[rid]
+            current_tail_rid = self.table.base_pages[0][base_page_index].read(base_slot)
+            
+            # Collect all tail records in a list
+            tail_chain = []
+            temp_tail_rid = current_tail_rid
+            while temp_tail_rid != 0:
+                if temp_tail_rid not in self.table.page_directory:
+                    break
+                tail_chain.append(temp_tail_rid)
+                tail_page_index, tail_slot = self.table.page_directory[temp_tail_rid]
+                temp_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
+            
+            # Determine which version to retrieve
+            if relative_version == 0:
+                # Latest version - traverse from newest tail
+                columns_needed_copy = columns_needed.copy()
+                for tail_rid in tail_chain:
+                    if len(columns_needed_copy) == 0:
+                        break
+                    tail_page_index, tail_slot = self.table.page_directory[tail_rid]
+                    schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
+                    
+                    for col_num in list(columns_needed_copy):
+                        if schema_encoding & (1 << col_num):
+                            tail_col_index = 4 + col_num
+                            result_columns[col_num] = self.table.tail_pages[tail_col_index][tail_page_index].read(tail_slot)
+                            columns_needed_copy.remove(col_num)
+                
+                # Fill remaining from base
+                for col_num in columns_needed_copy:
+                    base_col_index = 4 + col_num
+                    result_columns[col_num] = self.table.base_pages[base_col_index][base_page_index].read(base_slot)
+            
+            else:
+                # Historical version (negative relative_version)
+                version_offset = abs(relative_version)
+                
+                # Start from the tail at position version_offset
+                columns_needed_copy = columns_needed.copy()
+                start_index = version_offset
+                
+                for i in range(start_index, len(tail_chain)):
+                    if len(columns_needed_copy) == 0:
+                        break
+                    tail_rid = tail_chain[i]
+                    tail_page_index, tail_slot = self.table.page_directory[tail_rid]
+                    schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
+                    
+                    for col_num in list(columns_needed_copy):
+                        if schema_encoding & (1 << col_num):
+                            tail_col_index = 4 + col_num
+                            result_columns[col_num] = self.table.tail_pages[tail_col_index][tail_page_index].read(tail_slot)
+                            columns_needed_copy.remove(col_num)
+                
+                # Fill remaining from base
+                for col_num in columns_needed_copy:
+                    base_col_index = 4 + col_num
+                    result_columns[col_num] = self.table.base_pages[base_col_index][base_page_index].read(base_slot)
+
+            key_val = result_columns[self.table.key]
+            record = Record(rid, key_val, result_columns)
+            records.append(record)
+
+        return records
 
     
     """
@@ -261,7 +354,91 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
-        pass
+        total = 0
+        agg_col_index = 4 + aggregate_column_index
+        found_any = False
+
+        # Use index range query if primary key is indexed
+        if self.table.index.indices[self.table.key] is not None:
+            rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+        else:
+            # Fall back to linear scan
+            rids = []
+            key_col_index = 4 + self.table.key
+            for rid in self.table.base_rids:
+                page_index, slot = self.table.page_directory[rid]
+                key_val = self.table.base_pages[key_col_index][page_index].read(slot)
+                if start_range <= key_val <= end_range:
+                    rids.append(rid)
+
+        # Process each RID in range
+        for rid in rids:
+            if rid not in self.table.base_rids:
+                continue
+                
+            found_any = True
+            # Get value for agg column at the specified version
+            base_page_index, base_slot = self.table.page_directory[rid]
+            current_tail_rid = self.table.base_pages[0][base_page_index].read(base_slot)
+
+            # Collect all tail records in a list (newest to oldest)
+            tail_chain = []
+            temp_tail_rid = current_tail_rid
+            while temp_tail_rid != 0:
+                if temp_tail_rid not in self.table.page_directory:
+                    break
+                tail_chain.append(temp_tail_rid)
+                tail_page_index, tail_slot = self.table.page_directory[temp_tail_rid]
+                temp_tail_rid = self.table.tail_pages[0][tail_page_index].read(tail_slot)
+            
+            value_found = False
+            
+            if relative_version == 0:
+                # Latest version - traverse from newest tail
+                for tail_rid in tail_chain:
+                    if value_found:
+                        break
+                    tail_page_index, tail_slot = self.table.page_directory[tail_rid]
+                    schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
+                    
+                    if schema_encoding & (1 << aggregate_column_index):
+                        value = self.table.tail_pages[agg_col_index][tail_page_index].read(tail_slot)
+                        total += value
+                        value_found = True
+                
+                # If not found in tail records, get from base
+                if not value_found:
+                    value = self.table.base_pages[agg_col_index][base_page_index].read(base_slot)
+                    total += value
+            
+            else:
+                # Historical version (negative relative_version)
+                version_offset = abs(relative_version)
+                
+                # Start from the tail at position version_offset
+                start_index = version_offset
+                
+                for i in range(start_index, len(tail_chain)):
+                    if value_found:
+                        break
+                    tail_rid = tail_chain[i]
+                    tail_page_index, tail_slot = self.table.page_directory[tail_rid]
+                    schema_encoding = self.table.tail_pages[3][tail_page_index].read(tail_slot)
+                    
+                    if schema_encoding & (1 << aggregate_column_index):
+                        value = self.table.tail_pages[agg_col_index][tail_page_index].read(tail_slot)
+                        total += value
+                        value_found = True
+                
+                # If not found in tail records, get from base
+                if not value_found:
+                    value = self.table.base_pages[agg_col_index][base_page_index].read(base_slot)
+                    total += value
+
+        if not found_any:
+            return False
+        
+        return total
 
     
     """
