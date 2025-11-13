@@ -119,6 +119,22 @@ class Table:
         
         # Phase 3: Atomic switchover
         with self.merge_lock:
+            for base_rid in self.base_rids:
+                if base_rid not in self.page_directory:
+                    continue
+                base_page_idx, base_slot = self.page_directory[base_rid]
+                
+                # Read current indirection from LIVE base_pages
+                current_indirection = self.base_pages[INDIRECTION_COLUMN][base_page_idx].read(base_slot)
+                
+                # If indirection points to a tail record that was NOT merged,
+                # we need to preserve it in new_base_pages
+                if current_indirection != 0 and current_indirection not in merged_tail_rids:
+                    new_base_pages[INDIRECTION_COLUMN][base_page_idx].update(base_slot, current_indirection)
+                    # Also preserve the schema encoding for this record
+                    current_schema = self.base_pages[SCHEMA_ENCODING_COLUMN][base_page_idx].read(base_slot)
+                    new_base_pages[SCHEMA_ENCODING_COLUMN][base_page_idx].update(base_slot, current_schema)
+                    
             self.base_pages = new_base_pages
             
             # Build mapping of old RID -> new RID location BEFORE deleting anything
