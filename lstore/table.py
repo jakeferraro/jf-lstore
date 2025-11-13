@@ -45,9 +45,9 @@ class Table:
         self.merge_threshold = 10
 
     def __merge(self):
-        print("merge is happening")
+        print(f"merge is happening")
         
-        # Phase 1: Capture merge boundary ATOMICALLY
+        # Capture merge boundary atomically
         with self.merge_lock:
             merge_cutoff = self.next_tail_position
             if merge_cutoff == 0:
@@ -55,7 +55,7 @@ class Table:
             
             merge_tail_page_count = len(self.tail_pages[0])
         
-        # Phase 2: Build merged base pages (NO LOCK)
+        # Build merged base pages (no lock)
         new_base_pages = []
         for col_pages in self.base_pages:
             new_col_pages = []
@@ -69,6 +69,8 @@ class Table:
         merged_tail_rids = set()
         record_updates = {}
         
+        # First pass: identify the most recent tail for each base record
+        most_recent_tail = {}  # base_rid -> most_recent_tail_rid
         for tail_position in range(merge_cutoff - 1, -1, -1):
             tail_page_idx = tail_position // 512
             tail_slot = tail_position % 512
@@ -80,12 +82,42 @@ class Table:
             if tail_rid == 0xFFFFFFFFFFFFFFFF:
                 continue
             
-            merged_tail_rids.add(tail_rid)
             base_rid = self.tail_pages[BASE_RID_COLUMN][tail_page_idx].read(tail_slot)
             
             if base_rid not in self.page_directory:
                 continue
             
+            # Track the first tail we see for each base (most recent since we iterate backwards)
+            if base_rid not in most_recent_tail:
+                # Find the actual most recent by following indirection from base
+                base_page_idx, base_slot = self.page_directory[base_rid]
+                current_indirection = self.base_pages[INDIRECTION_COLUMN][base_page_idx].read(base_slot)
+                if current_indirection != 0:
+                    most_recent_tail[base_rid] = current_indirection
+        
+        # Second pass: merge only historical (non-most-recent) tail records
+        for tail_position in range(merge_cutoff - 1, -1, -1):
+            tail_page_idx = tail_position // 512
+            tail_slot = tail_position % 512
+            
+            if tail_page_idx >= merge_tail_page_count:
+                continue
+            
+            tail_rid = self.tail_pages[RID_COLUMN][tail_page_idx].read(tail_slot)
+            if tail_rid == 0xFFFFFFFFFFFFFFFF:
+                continue
+            
+            base_rid = self.tail_pages[BASE_RID_COLUMN][tail_page_idx].read(tail_slot)
+            
+            if base_rid not in self.page_directory:
+                continue
+            
+            # Skip if this is the most recent tail for this base record
+            if base_rid in most_recent_tail and tail_rid == most_recent_tail[base_rid]:
+                continue
+            
+            # This is a historical tail record - merge it
+            merged_tail_rids.add(tail_rid)
             schema_encoding = self.tail_pages[SCHEMA_ENCODING_COLUMN][tail_page_idx].read(tail_slot)
             
             if base_rid not in record_updates:
@@ -117,7 +149,7 @@ class Table:
                 new_base_pages[INDIRECTION_COLUMN][base_page_idx].update(base_slot, 0)
                 new_base_pages[SCHEMA_ENCODING_COLUMN][base_page_idx].update(base_slot, 0)
         
-        # Phase 3: Atomic switchover
+        # Atomic switchover
         with self.merge_lock:
             for base_rid in self.base_rids:
                 if base_rid not in self.page_directory:
@@ -183,7 +215,7 @@ class Table:
                         for col in range(5 + self.num_columns):
                             new_tail_pages[col].append(Page())
                     
-                    # Copy all columns EXCEPT indirection
+                    # Copy all columns except indirection
                     for col_idx in range(5 + self.num_columns):
                         if col_idx == INDIRECTION_COLUMN:
                             # Fix indirection pointer
@@ -300,7 +332,7 @@ class Table:
             self.tail_pages[1][page_index].write(rid)
             self.tail_pages[2][page_index].write(timestamp)
             self.tail_pages[3][page_index].write(schema_encoding)
-            self.tail_pages[4][page_index].write(base_rid)  # Store BaseRID
+            self.tail_pages[4][page_index].write(base_rid)  # Store base RID
             # Sixth, write user data for columns that are not None
             for i, value in enumerate(columns):
                 col_index = 5 + i  # User columns start at index 5 now
@@ -315,4 +347,3 @@ class Table:
             self.updates_since_merge += 1
 
         self.trigger_merge()
-    
