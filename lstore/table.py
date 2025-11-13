@@ -18,6 +18,7 @@ class Record:
         self.columns = columns
 
 
+
 class Table:
 
     """
@@ -44,8 +45,9 @@ class Table:
         self.updates_since_merge = 0
         self.merge_threshold = 10
 
+
     def __merge(self):
-        print(f"merge is happening")
+        print("merge is happening")
         
         # Capture merge boundary atomically
         with self.merge_lock:
@@ -156,10 +158,10 @@ class Table:
                     continue
                 base_page_idx, base_slot = self.page_directory[base_rid]
                 
-                # Read current indirection from LIVE base_pages
+                # Read current indirection from live base_pages
                 current_indirection = self.base_pages[INDIRECTION_COLUMN][base_page_idx].read(base_slot)
                 
-                # If indirection points to a tail record that was NOT merged,
+                # If indirection points to a tail record that was not merged,
                 # we need to preserve it in new_base_pages
                 if current_indirection != 0 and current_indirection not in merged_tail_rids:
                     new_base_pages[INDIRECTION_COLUMN][base_page_idx].update(base_slot, current_indirection)
@@ -169,7 +171,7 @@ class Table:
                     
             self.base_pages = new_base_pages
             
-            # Build mapping of old RID -> new RID location BEFORE deleting anything
+            # Build mapping of old RID -> new RID location before deleting anything
             tail_rid_mapping = {}  # old_rid -> new_location
             
             # First pass: build the mapping
@@ -187,7 +189,7 @@ class Table:
                 
                 tail_rid = self.tail_pages[RID_COLUMN][tail_page_idx].read(tail_slot)
                 
-                # Keep records that were NOT merged and not deleted
+                # Keep records that were not merged and not deleted
                 if tail_rid not in merged_tail_rids and tail_rid != 0xFFFFFFFFFFFFFFFF:
                     new_position = new_next_tail_position
                     new_page_idx = new_position // 512
@@ -250,12 +252,14 @@ class Table:
             self.next_tail_position = new_next_tail_position
             self.updates_since_merge = 0
 
+
     def trigger_merge(self):
         if self.updates_since_merge >= self.merge_threshold:
             if self.merge_thread is None or not self.merge_thread.is_alive():
                 self.merge_thread = threading.Thread(target=self.__merge, daemon=True)
                 self.merge_thread.start()
-    
+
+
     def insert_record(self, columns):
         rid = self.next_rid
         self.base_rids.add(rid)
@@ -290,9 +294,11 @@ class Table:
             if self.index.indices[col_num] is not None:
                 self.index._insert_entry(col_num, columns[col_num], rid)
 
+
     def _update_base_indirection(self, rid, new_indirection_val):
         page_index, slot = self.page_directory[rid]
         self.base_pages[0][page_index].update(slot, new_indirection_val)
+
 
     def _update_base_schema(self, rid, new_schema_val):
         page_index, slot = self.page_directory[rid]
@@ -300,6 +306,7 @@ class Table:
         # OR with new schema to accumulate which columns have been updated
         updated_schema = current_schema | new_schema_val
         self.base_pages[3][page_index].update(slot, updated_schema)
+
 
     def create_tail_record(self, base_rid, columns):
         with self.merge_lock:

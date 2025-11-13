@@ -150,9 +150,7 @@ class Query:
                 record = Record(rid, key_val, result_columns)
                 records.append(record)
 
-            return records
-                    
-                
+            return records   
 
     
     """
@@ -346,7 +344,6 @@ class Query:
                 return False
             
             return total
-
 
     
     """
