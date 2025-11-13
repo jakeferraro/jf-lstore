@@ -46,13 +46,16 @@ class Table:
 
     def __merge(self):
         print("merge is happening")
-        # determine how many tail records to merge
+        
+        # Phase 1: Capture merge boundary ATOMICALLY
         with self.merge_lock:
             merge_cutoff = self.next_tail_position
             if merge_cutoff == 0:
-                return  # nothing to merge
+                return
             
-        # deep copy current base pages
+            merge_tail_page_count = len(self.tail_pages[0])
+        
+        # Phase 2: Build merged base pages (NO LOCK)
         new_base_pages = []
         for col_pages in self.base_pages:
             new_col_pages = []
@@ -63,81 +66,140 @@ class Table:
                 new_col_pages.append(new_page)
             new_base_pages.append(new_col_pages)
 
-        # build a dict of updates: base_rid -> {col_num -> val}
-        # iterate tail records in reverse order
+        merged_tail_rids = set()
         record_updates = {}
         
         for tail_position in range(merge_cutoff - 1, -1, -1):
             tail_page_idx = tail_position // 512
             tail_slot = tail_position % 512
             
-            # Check if tail page exists
-            if tail_page_idx >= len(self.tail_pages[0]):
+            if tail_page_idx >= merge_tail_page_count:
                 continue
             
-            # Read tail record RID to check if it's valid (not deleted)
             tail_rid = self.tail_pages[RID_COLUMN][tail_page_idx].read(tail_slot)
-            if tail_rid == 0xFFFFFFFFFFFFFFFF:  # Deleted/invalidated
+            if tail_rid == 0xFFFFFFFFFFFFFFFF:
                 continue
             
-            # Read the base RID this tail record belongs to
+            merged_tail_rids.add(tail_rid)
             base_rid = self.tail_pages[BASE_RID_COLUMN][tail_page_idx].read(tail_slot)
             
-            # Check if base record still exists
             if base_rid not in self.page_directory:
                 continue
             
-            # Read schema encoding to see which columns were updated
             schema_encoding = self.tail_pages[SCHEMA_ENCODING_COLUMN][tail_page_idx].read(tail_slot)
             
-            # Initialize record updates dict for this base record if needed
             if base_rid not in record_updates:
                 record_updates[base_rid] = {}
             
-            # For each column that was updated in this tail record
             for col_num in range(self.num_columns):
-                # Skip if we already have a newer update for this column
                 if col_num in record_updates[base_rid]:
                     continue
                 
-                # Check if this column was updated in this tail record
                 if schema_encoding & (1 << col_num):
-                    tail_col_idx = 5 + col_num  # User columns start at index 5 in tail
+                    tail_col_idx = 5 + col_num
                     value = self.tail_pages[tail_col_idx][tail_page_idx].read(tail_slot)
                     record_updates[base_rid][col_num] = value
         
-        # Apply updates to the new base pages
+        # Apply updates to new base pages
         for base_rid, updates in record_updates.items():
             if base_rid not in self.page_directory:
                 continue
             
             base_page_idx, base_slot = self.page_directory[base_rid]
             
-            # Apply each column update
             for col_num, value in updates.items():
-                base_col_idx = 4 + col_num  # User columns start at index 4 in base
+                base_col_idx = 4 + col_num
                 new_base_pages[base_col_idx][base_page_idx].update(base_slot, value)
             
-            # Reset indirection and schema encoding for this base record
-            new_base_pages[INDIRECTION_COLUMN][base_page_idx].update(base_slot, 0)
-            new_base_pages[SCHEMA_ENCODING_COLUMN][base_page_idx].update(base_slot, 0)
+            # Only reset if indirection points to something we merged
+            current_indirection = self.base_pages[INDIRECTION_COLUMN][base_page_idx].read(base_slot)
+            if current_indirection != 0 and current_indirection in merged_tail_rids:
+                new_base_pages[INDIRECTION_COLUMN][base_page_idx].update(base_slot, 0)
+                new_base_pages[SCHEMA_ENCODING_COLUMN][base_page_idx].update(base_slot, 0)
         
-        # Phase 2: Atomic switchover (BRIEF LOCK)
+        # Phase 3: Atomic switchover
         with self.merge_lock:
-            # Swap base pages
             self.base_pages = new_base_pages
-
-            # Remove all tail record entries from page_directory
-            # Keep only base record entries (those in base_rids)
-            tail_rids_to_remove = [rid for rid in self.page_directory.keys() if rid not in self.base_rids]
-            for tail_rid in tail_rids_to_remove:
-                del self.page_directory[tail_rid]
             
-            # Create fresh tail pages structure
-            self.tail_pages = [[Page()] for _ in range(5 + self.num_columns)]
-            self.next_tail_position = 0
+            # Build mapping of old RID -> new RID location BEFORE deleting anything
+            tail_rid_mapping = {}  # old_rid -> new_location
             
-            # Reset update counter
+            # First pass: build the mapping
+            new_tail_pages = [[Page()] for _ in range(5 + self.num_columns)]
+            new_next_tail_position = 0
+            
+            current_tail_end = self.next_tail_position
+            
+            for tail_position in range(current_tail_end):
+                tail_page_idx = tail_position // 512
+                tail_slot = tail_position % 512
+                
+                if tail_page_idx >= len(self.tail_pages[0]):
+                    continue
+                
+                tail_rid = self.tail_pages[RID_COLUMN][tail_page_idx].read(tail_slot)
+                
+                # Keep records that were NOT merged and not deleted
+                if tail_rid not in merged_tail_rids and tail_rid != 0xFFFFFFFFFFFFFFFF:
+                    new_position = new_next_tail_position
+                    new_page_idx = new_position // 512
+                    new_slot = new_position % 512
+                    
+                    tail_rid_mapping[tail_rid] = (new_page_idx, new_slot)
+                    new_next_tail_position += 1
+            
+            # Second pass: copy records and fix indirection pointers
+            new_next_tail_position = 0
+            
+            for tail_position in range(current_tail_end):
+                tail_page_idx = tail_position // 512
+                tail_slot = tail_position % 512
+                
+                if tail_page_idx >= len(self.tail_pages[0]):
+                    continue
+                
+                tail_rid = self.tail_pages[RID_COLUMN][tail_page_idx].read(tail_slot)
+                
+                if tail_rid not in merged_tail_rids and tail_rid != 0xFFFFFFFFFFFFFFFF:
+                    new_page_idx, new_slot = tail_rid_mapping[tail_rid]
+                    
+                    if new_page_idx >= len(new_tail_pages[0]):
+                        for col in range(5 + self.num_columns):
+                            new_tail_pages[col].append(Page())
+                    
+                    # Copy all columns EXCEPT indirection
+                    for col_idx in range(5 + self.num_columns):
+                        if col_idx == INDIRECTION_COLUMN:
+                            # Fix indirection pointer
+                            old_indirection = self.tail_pages[INDIRECTION_COLUMN][tail_page_idx].read(tail_slot)
+                            
+                            if old_indirection in merged_tail_rids:
+                                # Points to a merged tail - reset to 0
+                                new_tail_pages[INDIRECTION_COLUMN][new_page_idx].write(0)
+                            elif old_indirection in tail_rid_mapping:
+                                # Points to another tail that's being kept - keep the RID same
+                                # (the RID itself doesn't change, just the location in page_directory)
+                                new_tail_pages[INDIRECTION_COLUMN][new_page_idx].write(old_indirection)
+                            else:
+                                # Points to 0 or something else
+                                new_tail_pages[INDIRECTION_COLUMN][new_page_idx].write(old_indirection)
+                        else:
+                            value = self.tail_pages[col_idx][tail_page_idx].read(tail_slot)
+                            new_tail_pages[col_idx][new_page_idx].write(value)
+                    
+                    new_next_tail_position += 1
+            
+            # Update page directory with new tail positions
+            for tail_rid, location in tail_rid_mapping.items():
+                self.page_directory[tail_rid] = location
+            
+            # Remove merged tail RIDs from page directory
+            for tail_rid in merged_tail_rids:
+                if tail_rid in self.page_directory:
+                    del self.page_directory[tail_rid]
+            
+            self.tail_pages = new_tail_pages
+            self.next_tail_position = new_next_tail_position
             self.updates_since_merge = 0
 
     def trigger_merge(self):
