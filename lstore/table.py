@@ -335,7 +335,7 @@ class Table:
             self.tail_pages[4][page_index].write(base_rid)  # Store base RID
             # Sixth, write user data for columns that are not None
             for i, value in enumerate(columns):
-                col_index = 5 + i  # User columns start at index 5 now
+                col_index = 5 + i  # User columns start at index 5
                 if value is not None:
                     self.tail_pages[col_index][page_index].write(value)
                 else:
