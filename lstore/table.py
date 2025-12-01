@@ -45,9 +45,12 @@ class Table:
         self.updates_since_merge = 0
         self.merge_threshold = 10
 
+        # transaction support
+        self._insert_lock = threading.Lock()
+
 
     def __merge(self):
-        print("merge is happening")
+        # print("merge is happening")
         
         # Capture merge boundary atomically
         with self.merge_lock:
@@ -354,3 +357,41 @@ class Table:
             self.updates_since_merge += 1
 
         self.trigger_merge()
+
+
+    def delete_record(self, rid):
+        """
+        Delete a record by RID. Used for transaction rollback.
+        """
+        if rid not in self.base_rids:
+            return False
+
+        page_index, slot = self.page_directory[rid]
+
+        # Invalidate all tail records in chain
+        base_indirection = self.base_pages[0][page_index].read(slot)
+        current_tail_rid = base_indirection
+
+        while current_tail_rid != 0:
+            if current_tail_rid in self.page_directory:
+                tail_page_idx, tail_slot = self.page_directory[current_tail_rid]
+                next_tail_rid = self.tail_pages[0][tail_page_idx].read(tail_slot)
+                self.tail_pages[1][tail_page_idx].update(tail_slot, 0xFFFFFFFFFFFFFFFF)
+                current_tail_rid = next_tail_rid
+            else:
+                break
+
+        # Mark base record as deleted
+        self.base_pages[1][page_index].update(slot, 0xFFFFFFFFFFFFFFFF)
+
+        # Remove from base_rids
+        self.base_rids.discard(rid)
+
+        # Remove from indexes
+        for col_num in range(self.num_columns):
+            if self.index.indices[col_num] is not None:
+                col_idx = 4 + col_num
+                value = self.base_pages[col_idx][page_index].read(slot)
+                self.index._delete_entry(col_num, value, rid)
+
+        return True
