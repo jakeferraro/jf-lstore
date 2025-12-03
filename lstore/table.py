@@ -43,7 +43,7 @@ class Table:
         self.merge_lock = threading.Lock()
         self.merge_thread = None
         self.updates_since_merge = 0
-        self.merge_threshold = 10
+        self.merge_threshold = 100
 
         # transaction support
         self._insert_lock = threading.Lock()
