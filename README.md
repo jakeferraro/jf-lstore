@@ -1,6 +1,6 @@
 # L-Store Database
 
-A column-oriented database with MVCC, transactions, and disk persistence.
+A column-oriented database with 2PL, transactions, and disk persistence.
 
 ## Installation
 
